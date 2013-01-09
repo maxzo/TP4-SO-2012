@@ -1,3 +1,4 @@
+#include <ext2_fs.h>
 #include <stdio.h>
 #include <sys/vfs.h>
 #include <unistd.h>
@@ -7,6 +8,9 @@
 #define EXT2_SUPER_MAGIC 0xEF53
 
 int formato_ext2(char* path);
+void datos_filesystem(char* path);
+void entradas_directorios(char* path);
+void consistencia_inodos(char* path);
 
 int main(int argc, char *argv[])
 {
@@ -17,31 +21,31 @@ int main(int argc, char *argv[])
 		case 's':
 			if (formato_ext2(optarg))
 			{
-				
+				datos_filesystem(optarg);
 			}
 			else
 			{
-				
+				printf("ERROR: La unidad no tiene un sistema de archivos EXT2\n");
 			}
 			break;
 		case 'e':
 			if (formato_ext2(optarg))
 			{
-				
+				entradas_directorios(optarg);
 			}
 			else
 			{
-				
+				printf("ERROR: La unidad no tiene un sistema de archivos EXT2\n");
 			}
 			break;
 		case 'c':
 			if (formato_ext2(optarg))
 			{
-				
+				consistencia_inodos(optarg);
 			}
 			else
 			{
-				
+				printf("ERROR: La unidad no tiene un sistema de archivos EXT2\n");
 			}
 			break;
 		default:
@@ -61,4 +65,19 @@ int formato_ext2(char* path)
 	}
 	
 	return 0;
+}
+
+void datos_filesystem(char* path)
+{
+	
+}
+
+void entradas_directorios(char* path)
+{
+	
+}
+
+void consistencia_inodos(char* path)
+{
+	
 }
