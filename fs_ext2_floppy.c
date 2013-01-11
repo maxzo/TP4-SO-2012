@@ -1,13 +1,11 @@
-#include <ext2_fs.h>
+#include <fcntl.h>
+#include <linux/ext2_fs.h>
+#include <linux/magic.h>
 #include <stdio.h>
-#include <sys/vfs.h>
+#include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
-/* Extraídas del man page de statfs */
-#define EXT2_OLD_SUPER_MAGIC 0xEF51
-#define EXT2_SUPER_MAGIC 0xEF53
-
-int formato_ext2(char* path);
 void datos_filesystem(char* path);
 void entradas_directorios(char* path);
 void consistencia_inodos(char* path);
@@ -19,34 +17,13 @@ int main(int argc, char *argv[])
 	switch (opcion)
 	{
 		case 's':
-			if (formato_ext2(optarg))
-			{
-				datos_filesystem(optarg);
-			}
-			else
-			{
-				printf("ERROR: La unidad no tiene un sistema de archivos EXT2\n");
-			}
+			datos_filesystem(optarg);
 			break;
 		case 'e':
-			if (formato_ext2(optarg))
-			{
-				entradas_directorios(optarg);
-			}
-			else
-			{
-				printf("ERROR: La unidad no tiene un sistema de archivos EXT2\n");
-			}
+			entradas_directorios(optarg);
 			break;
 		case 'c':
-			if (formato_ext2(optarg))
-			{
-				consistencia_inodos(optarg);
-			}
-			else
-			{
-				printf("ERROR: La unidad no tiene un sistema de archivos EXT2\n");
-			}
+			consistencia_inodos(optarg);
 			break;
 		default:
 			printf("Sintaxis: %s [-sec] /dev/fd0\n", argv[0]);
@@ -55,21 +32,28 @@ int main(int argc, char *argv[])
 	return 0;
 }
 
-int formato_ext2(char* path)
-{
-	struct statfs buf;
-	
-	if (statfs(path, &buf) == 0) /* Éxito */
-	{
-		return (buf.f_type == EXT2_OLD_SUPER_MAGIC || buf.f_type == EXT2_SUPER_MAGIC);
-	}
-	
-	return 0;
-}
-
 void datos_filesystem(char* path)
 {
+	int fd;
+	struct ext2_super_block super_block;
 	
+	fd = open(path, O_RDONLY);
+	lseek(fd, 1024, SEEK_CUR);
+	read(fd, &super_block, sizeof(struct ext2_super_block));
+	
+	if (super_block.s_magic != EXT2_SUPER_MAGIC)
+	{
+		printf("ERROR: La unidad no tiene un sistema de archivos EXT2\n");
+	}
+	else
+	{
+		printf("Sistema de archivos: EXT2\n");
+		printf("Cantidad de inodos: %d\n", super_block.s_inodes_count);
+		printf("Cantidad de inodos libres: %d\n", super_block.s_free_inodes_count);
+		printf("Primer inodo usable: %d\n", super_block.s_first_ino);
+	}
+	
+	close(fd);
 }
 
 void entradas_directorios(char* path)
