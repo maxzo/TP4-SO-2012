@@ -90,6 +90,7 @@ void entradas_directorios(char* path)
 		tamanho_bloque = 1024 << super_block.s_log_block_size;
 		bloques_por_grupo = super_block.s_blocks_per_group;
 		inodos_por_grupo = super_block.s_inodes_per_group;
+		punteros_por_bloque = tamanho_bloque / 4;
 		
 		int cantidad_grupos = (super_block.s_blocks_count + bloques_por_grupo - 1)
 			/ bloques_por_grupo;
@@ -175,7 +176,58 @@ void entradas_directorios(char* path)
 
 void consistencia_inodos(char* path)
 {
+	int fd;
+	struct ext2_group_desc descriptor_grupo;
+	struct ext2_super_block super_block;
 	
+	int tamanho_bloque;
+	
+	fd = open(path, O_RDONLY);
+	lseek(fd, 1024, SEEK_SET);
+	read(fd, &super_block, sizeof(struct ext2_super_block));
+	
+	if (super_block.s_magic != EXT2_SUPER_MAGIC)
+	{
+		printf("ERROR: La unidad no tiene un sistema de archivos EXT2\n");
+	}
+	else
+	{
+		tamanho_bloque = 1024 << super_block.s_log_block_size;
+		
+		char* buffer = malloc(tamanho_bloque);
+		
+		lseek(fd, 2048, SEEK_SET);
+		read(fd, &descriptor_grupo, sizeof(struct ext2_group_desc));
+		
+		lseek(fd, 1024 + (descriptor_grupo.bg_inode_bitmap - 1) * tamanho_bloque, SEEK_SET);
+		read(fd, buffer, tamanho_bloque);
+		
+		int i = 0, j;
+		int inodos_libres_s_bitmap = 0;
+		
+		do
+		{
+			for (j = 7; j > -1; j--)
+			{
+				if ((buffer[i] >> j) % 2 == 0) /* Me fijo si el último bit es 0 */
+				{
+					inodos_libres_s_bitmap++;
+				}
+			}
+		}
+		while (buffer[++i] != 0);
+		
+		do
+		{
+			inodos_libres_s_bitmap += 8;
+		}
+		while (buffer[++i] == 0);
+		
+		printf("Cantidad de inodos libres (segun superblock): %d\n", super_block.s_free_inodes_count);
+		printf("Cantidad de inodos libres (segun bitmap de inodos): %d\n", inodos_libres_s_bitmap);
+	}
+	
+	close(fd);
 }
 
 int get_bloque_ind_simple(int fd, int numero_bloque, int tamanho_bloque,
