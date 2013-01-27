@@ -8,17 +8,26 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#define TRUE 1
+#define FALSE 0
+
 void datos_filesystem(char* path);
 void entradas_directorios(char* path);
 void consistencia_inodos(char* path);
 
 void leer_inodo(int fd, struct ext2_super_block* super_block,
 	struct ext2_group_desc* descriptor_grupo, int numero_inodo);
+int inodos_ocupados(int fd, struct ext2_super_block* super_block,
+	struct ext2_group_desc* descriptor_grupo, int numero_inodo);
+int contiene(int* lista, int valor);
+
+int* lista_ocupados;
+int tamanho_lista_ocupados;
 
 int main(int argc, char *argv[])
 {
 	char opcion = getopt(argc, argv, "s:e:c:");
-	
+
 	switch (opcion)
 	{
 		case 's':
@@ -33,7 +42,7 @@ int main(int argc, char *argv[])
 		default:
 			printf("Sintaxis: %s [-sec] /dev/fd0\n", argv[0]);
 	}
-	
+
 	return 0;
 }
 
@@ -41,11 +50,11 @@ void datos_filesystem(char* path)
 {
 	int fd;
 	struct ext2_super_block super_block;
-	
+
 	fd = open(path, O_RDONLY);
 	lseek(fd, 1024, SEEK_SET);
 	read(fd, &super_block, sizeof(struct ext2_super_block));
-	
+
 	if (super_block.s_magic != EXT2_SUPER_MAGIC)
 	{
 		printf("ERROR: La unidad no tiene un sistema de archivos EXT2\n");
@@ -57,7 +66,7 @@ void datos_filesystem(char* path)
 		printf("Cantidad de inodos libres: %d\n", super_block.s_free_inodes_count);
 		printf("Primer inodo usable: %d\n", super_block.s_first_ino);
 	}
-	
+
 	close(fd);
 }
 
@@ -66,11 +75,11 @@ void entradas_directorios(char* path)
 	int fd;
 	struct ext2_group_desc descriptor_grupo;
 	struct ext2_super_block super_block;
-	
+
 	fd = open(path, O_RDONLY);
 	lseek(fd, 1024, SEEK_SET);
 	read(fd, &super_block, sizeof(struct ext2_super_block));
-	
+
 	if (super_block.s_magic != EXT2_SUPER_MAGIC)
 	{
 		printf("ERROR: La unidad no tiene un sistema de archivos EXT2\n");
@@ -79,10 +88,10 @@ void entradas_directorios(char* path)
 	{
 		lseek(fd, 1024 + EXT2_BLOCK_SIZE(&super_block), SEEK_SET);
 		read(fd, &descriptor_grupo, sizeof(struct ext2_group_desc));
-		
+
 		leer_inodo(fd, &super_block, &descriptor_grupo, EXT2_ROOT_INO);
 	}
-	
+
 	close(fd);
 }
 
@@ -91,32 +100,28 @@ void consistencia_inodos(char* path)
 	int fd;
 	struct ext2_group_desc descriptor_grupo;
 	struct ext2_super_block super_block;
-	
-	int tamanho_bloque;
-	
+
 	fd = open(path, O_RDONLY);
 	lseek(fd, 1024, SEEK_SET);
 	read(fd, &super_block, sizeof(struct ext2_super_block));
-	
+
 	if (super_block.s_magic != EXT2_SUPER_MAGIC)
 	{
 		printf("ERROR: La unidad no tiene un sistema de archivos EXT2\n");
 	}
 	else
 	{
-		tamanho_bloque = 1024 << super_block.s_log_block_size;
-		
-		char* buffer = malloc(tamanho_bloque);
-		
-		lseek(fd, 2048, SEEK_SET);
+		char* buffer = malloc(EXT2_BLOCK_SIZE(&super_block));
+
+		lseek(fd, 1024 + EXT2_BLOCK_SIZE(&super_block), SEEK_SET);
 		read(fd, &descriptor_grupo, sizeof(struct ext2_group_desc));
-		
-		lseek(fd, 1024 + (descriptor_grupo.bg_inode_bitmap - 1) * tamanho_bloque, SEEK_SET);
-		read(fd, buffer, tamanho_bloque);
-		
+
+		lseek(fd, 1024 + (descriptor_grupo.bg_inode_bitmap - 1) * EXT2_BLOCK_SIZE(&super_block), SEEK_SET);
+		read(fd, buffer, EXT2_BLOCK_SIZE(&super_block));
+
 		int i = 0, j;
 		int inodos_libres_s_bitmap = 0;
-		
+
 		do
 		{
 			for (j = 7; j > -1; j--)
@@ -128,17 +133,33 @@ void consistencia_inodos(char* path)
 			}
 		}
 		while (buffer[++i] != 0);
-		
+
 		do
 		{
 			inodos_libres_s_bitmap += 8;
 		}
 		while (buffer[++i] == 0);
-		
+
+		lista_ocupados = malloc(super_block.s_inodes_count * sizeof(int));
+		tamanho_lista_ocupados = 0;
+		int inodos_libres_s_entradas = super_block.s_inodes_count - super_block.s_first_ino + 1
+			- inodos_ocupados(fd, &super_block, &descriptor_grupo, EXT2_ROOT_INO);
+
 		printf("Cantidad de inodos libres (segun superblock): %d\n", super_block.s_free_inodes_count);
 		printf("Cantidad de inodos libres (segun bitmap de inodos): %d\n", inodos_libres_s_bitmap);
+		printf("Cantidad de inodos libres (segun entradas de directorio): %d\n", inodos_libres_s_entradas);
+		
+		if (super_block.s_free_inodes_count == inodos_libres_s_bitmap
+			&& super_block.s_free_inodes_count == inodos_libres_s_entradas)
+		{
+			printf("*** Dato consistente ***\n");
+		}
+		else
+		{
+			printf("*** Hay errores ***\n");
+		}
 	}
-	
+
 	close(fd);
 }
 
@@ -147,34 +168,34 @@ void leer_inodo(int fd, struct ext2_super_block* super_block,
 {
 	struct ext2_inode inodo;
 	int offset_aux = lseek(fd, 0, SEEK_CUR);
-	
+
 	/* Primero me muevo a la tabla de inodos y luego al inodo */
 	lseek(fd, 1024 + (descriptor_grupo->bg_inode_table - 1) * EXT2_BLOCK_SIZE(super_block), SEEK_SET);
 	lseek(fd, sizeof(struct ext2_inode) * (numero_inodo - 1), SEEK_CUR);
 	read(fd, &inodo, sizeof(struct ext2_inode));
-	
+
 	if (S_ISDIR(inodo.i_mode))
 	{
 		lseek(fd, 1024 + (inodo.i_block[0] - 1) * EXT2_BLOCK_SIZE(super_block), SEEK_SET);
-		
+
 		struct ext2_dir_entry_2 entrada_directorio;
 		int offset;
 		int suma_rec_len = 0;
-		
+
 		read(fd, &(entrada_directorio.inode), sizeof(__le32));
 		read(fd, &(entrada_directorio.rec_len), sizeof(__le16));
 		read(fd, &(entrada_directorio.name_len), sizeof(__u8));
 		read(fd, &(entrada_directorio.file_type), sizeof(__u8));
 		read(fd, &(entrada_directorio.name), entrada_directorio.name_len);
 		entrada_directorio.name[entrada_directorio.name_len] = '\0';
-	
+
 		suma_rec_len += entrada_directorio.rec_len;
-		
+
 		while (suma_rec_len <= EXT2_BLOCK_SIZE(super_block)
 			&& entrada_directorio.rec_len != 0)
 		{
 			printf("Inodo: %2d - %s", entrada_directorio.inode, entrada_directorio.name);
-			
+
 			if (entrada_directorio.file_type == EXT2_FT_DIR
 				&& (!(entrada_directorio.name_len == 1 && entrada_directorio.name[0] == '.')
 				&& !(entrada_directorio.name_len == 2 && entrada_directorio.name[0] == '.' && entrada_directorio.name[1] == '.')))
@@ -186,21 +207,99 @@ void leer_inodo(int fd, struct ext2_super_block* super_block,
 			{
 				printf("\n");
 			}
-			
+
 			offset = entrada_directorio.rec_len - sizeof(__le32) - sizeof(__le16) - sizeof(__u8)
 				- sizeof(__u8) - entrada_directorio.name_len;
 			lseek(fd, offset, SEEK_CUR);
-			
+
 			read(fd, &(entrada_directorio.inode), sizeof(__le32));
 			read(fd, &(entrada_directorio.rec_len), sizeof(__le16));
 			read(fd, &(entrada_directorio.name_len), sizeof(__u8));
 			read(fd, &(entrada_directorio.file_type), sizeof(__u8));
 			read(fd, &(entrada_directorio.name), entrada_directorio.name_len);
 			entrada_directorio.name[entrada_directorio.name_len] = '\0';
-			
+
 			suma_rec_len += entrada_directorio.rec_len;
 		}
-		
+
 		lseek(fd, offset_aux, SEEK_SET);
 	}
+}
+
+int inodos_ocupados(int fd, struct ext2_super_block* super_block,
+	struct ext2_group_desc* descriptor_grupo, int numero_inodo)
+{
+	struct ext2_inode inodo;
+	int offset_aux = lseek(fd, 0, SEEK_CUR);
+	int i_ocupados = 0;
+
+	/* Primero me muevo a la tabla de inodos y luego al inodo */
+	lseek(fd, 1024 + (descriptor_grupo->bg_inode_table - 1) * EXT2_BLOCK_SIZE(super_block), SEEK_SET);
+	lseek(fd, sizeof(struct ext2_inode) * (numero_inodo - 1), SEEK_CUR);
+	read(fd, &inodo, sizeof(struct ext2_inode));
+
+	if (S_ISDIR(inodo.i_mode))
+	{
+		lseek(fd, 1024 + (inodo.i_block[0] - 1) * EXT2_BLOCK_SIZE(super_block), SEEK_SET);
+
+		struct ext2_dir_entry_2 entrada_directorio;
+		int offset;
+		int suma_rec_len = 0;
+
+		read(fd, &(entrada_directorio.inode), sizeof(__le32));
+		read(fd, &(entrada_directorio.rec_len), sizeof(__le16));
+		read(fd, &(entrada_directorio.name_len), sizeof(__u8));
+		read(fd, &(entrada_directorio.file_type), sizeof(__u8));
+		read(fd, &(entrada_directorio.name), entrada_directorio.name_len);
+
+		suma_rec_len += entrada_directorio.rec_len;
+
+		while (suma_rec_len <= EXT2_BLOCK_SIZE(super_block)
+			&& entrada_directorio.rec_len != 0)
+		{
+			if (entrada_directorio.inode >= super_block->s_first_ino
+				&& !contiene(lista_ocupados, entrada_directorio.inode))
+			{
+				lista_ocupados[tamanho_lista_ocupados++] = entrada_directorio.inode;
+				i_ocupados++;
+			}
+
+			if (entrada_directorio.file_type == EXT2_FT_DIR
+				&& (!(entrada_directorio.name_len == 1 && entrada_directorio.name[0] == '.')
+				&& !(entrada_directorio.name_len == 2 && entrada_directorio.name[0] == '.' && entrada_directorio.name[1] == '.')))
+			{
+				i_ocupados += inodos_ocupados(fd, super_block, descriptor_grupo, entrada_directorio.inode);
+			}
+
+			offset = entrada_directorio.rec_len - sizeof(__le32) - sizeof(__le16) - sizeof(__u8)
+				- sizeof(__u8) - entrada_directorio.name_len;
+			lseek(fd, offset, SEEK_CUR);
+
+			read(fd, &(entrada_directorio.inode), sizeof(__le32));
+			read(fd, &(entrada_directorio.rec_len), sizeof(__le16));
+			read(fd, &(entrada_directorio.name_len), sizeof(__u8));
+			read(fd, &(entrada_directorio.file_type), sizeof(__u8));
+			read(fd, &(entrada_directorio.name), entrada_directorio.name_len);
+
+			suma_rec_len += entrada_directorio.rec_len;
+		}
+
+		lseek(fd, offset_aux, SEEK_SET);
+	}
+
+	return i_ocupados;
+}
+
+int contiene(int* lista, int valor)
+{
+    int i;
+    for (i = 0; i < tamanho_lista_ocupados; i++)
+    {
+        if (lista[i] == valor)
+        {
+            return TRUE;
+        }
+    }
+
+    return FALSE;
 }
