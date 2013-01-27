@@ -12,12 +12,8 @@ void datos_filesystem(char* path);
 void entradas_directorios(char* path);
 void consistencia_inodos(char* path);
 
-int get_bloque_ind_simple(int fd, int numero_bloque, int tamanho_bloque,
-	int punteros_por_bloque, char* buffer, int offset);
-int get_bloque_ind_doble(int fd, int numero_bloque, int tamanho_bloque,
-	int punteros_por_bloque, char* buffer, int offset);
-int get_bloque_ind_triple(int fd, int numero_bloque, int tamanho_bloque,
-	int punteros_por_bloque, char* buffer, int offset);
+void leer_inodo(int fd, struct ext2_super_block* super_block,
+	struct ext2_group_desc* descriptor_grupo, int numero_inodo);
 
 int main(int argc, char *argv[])
 {
@@ -68,14 +64,8 @@ void datos_filesystem(char* path)
 void entradas_directorios(char* path)
 {
 	int fd;
-	struct ext2_group_desc* grupo;
-	struct ext2_inode inodo_raiz;
+	struct ext2_group_desc descriptor_grupo;
 	struct ext2_super_block super_block;
-	
-	int tamanho_bloque;
-	int bloques_por_grupo;
-	int inodos_por_grupo;
-	int punteros_por_bloque;
 	
 	fd = open(path, O_RDONLY);
 	lseek(fd, 1024, SEEK_SET);
@@ -87,88 +77,10 @@ void entradas_directorios(char* path)
 	}
 	else
 	{
-		tamanho_bloque = 1024 << super_block.s_log_block_size;
-		bloques_por_grupo = super_block.s_blocks_per_group;
-		inodos_por_grupo = super_block.s_inodes_per_group;
-		punteros_por_bloque = tamanho_bloque / 4;
+		lseek(fd, 1024 + EXT2_BLOCK_SIZE(&super_block), SEEK_SET);
+		read(fd, &descriptor_grupo, sizeof(struct ext2_group_desc));
 		
-		int cantidad_grupos = (super_block.s_blocks_count + bloques_por_grupo - 1)
-			/ bloques_por_grupo;
-		int tamanho = cantidad_grupos * sizeof(struct ext2_group_desc);
-		grupo = malloc(tamanho);
-		
-		int i;
-		for (i = 0; i < cantidad_grupos; i++)
-		{
-			lseek(fd, 1024 + tamanho_bloque + i
-				* sizeof(struct ext2_group_desc), SEEK_SET);
-			read(fd, grupo + i, sizeof(struct ext2_group_desc));
-		}
-		
-		int numero_grupo = 2 / inodos_por_grupo;
-		int offset_inodo = 2 - numero_grupo * inodos_por_grupo - 1;
-		int offset_bloque = 1024 + (grupo[numero_grupo].bg_inode_table - 1) * tamanho_bloque;
-		
-		lseek(fd, offset_bloque + offset_inodo * sizeof(struct ext2_inode), SEEK_SET);
-		read(fd, &inodo_raiz, sizeof(struct ext2_inode));
-		
-		if (S_ISDIR(inodo_raiz.i_mode))
-		{
-			char* buffer = malloc(tamanho_bloque * inodo_raiz.i_size);
-			int tamanho_i = 0;
-			struct ext2_dir_entry_2* entrada_directorio;
-			
-			int offset = 0;
-			int bloque = 0;
-			int cantidad_bloques = 0;
-			
-			while ((bloque < EXT2_NDIR_BLOCKS) && (cantidad_bloques <= inodo_raiz.i_blocks))
-			{
-				lseek(fd, 1024 + (inodo_raiz.i_block[bloque] - 1) * tamanho_bloque, SEEK_SET);
-				read(fd, buffer + offset, tamanho_bloque);
-				
-				offset += tamanho_bloque;
-				bloque++;
-				cantidad_bloques++;
-			}
-			
-			if (cantidad_bloques <= inodo_raiz.i_blocks)
-			{
-				offset = get_bloque_ind_simple(fd, inodo_raiz.i_block[EXT2_IND_BLOCK],
-					tamanho_bloque, punteros_por_bloque, buffer, offset);
-				cantidad_bloques += punteros_por_bloque;
-			}
-			
-			if (cantidad_bloques <= inodo_raiz.i_blocks)
-			{
-				offset = get_bloque_ind_doble(fd, inodo_raiz.i_block[EXT2_IND_BLOCK],
-					tamanho_bloque, punteros_por_bloque, buffer, offset);
-				cantidad_bloques += punteros_por_bloque * punteros_por_bloque;
-			}
-			
-			if (cantidad_bloques <= inodo_raiz.i_blocks)
-			{
-				offset = get_bloque_ind_triple(fd, inodo_raiz.i_block[EXT2_IND_BLOCK],
-					tamanho_bloque, punteros_por_bloque, buffer, offset);
-				cantidad_bloques += punteros_por_bloque * punteros_por_bloque
-					* punteros_por_bloque;
-			}
-			
-			char nombre_entrada[256];
-			
-			entrada_directorio = (struct ext2_dir_entry_2*) buffer;
-			
-			while (tamanho_i < inodo_raiz.i_size)
-			{
-				strncpy(nombre_entrada, entrada_directorio->name, entrada_directorio->name_len);
-				nombre_entrada[entrada_directorio->name_len] = '\0';
-				
-				printf("Inodo: %2d - %s\n", entrada_directorio->inode, nombre_entrada);
-				
-				tamanho_i += entrada_directorio->rec_len;
-				entrada_directorio = (void*) entrada_directorio + entrada_directorio->rec_len;
-			}
-		}
+		leer_inodo(fd, &super_block, &descriptor_grupo, EXT2_ROOT_INO);
 	}
 	
 	close(fd);
@@ -230,35 +142,65 @@ void consistencia_inodos(char* path)
 	close(fd);
 }
 
-int get_bloque_ind_simple(int fd, int numero_bloque, int tamanho_bloque,
-	int punteros_por_bloque, char* buffer, int offset)
+void leer_inodo(int fd, struct ext2_super_block* super_block,
+	struct ext2_group_desc* descriptor_grupo, int numero_inodo)
 {
-	char* buffer_local = malloc(tamanho_bloque);
+	struct ext2_inode inodo;
+	int offset_aux = lseek(fd, 0, SEEK_CUR);
 	
-	lseek(fd, 1024 + (numero_bloque - 1) * tamanho_bloque, SEEK_SET);
-	read(fd, buffer_local, tamanho_bloque);
+	/* Primero me muevo a la tabla de inodos y luego al inodo */
+	lseek(fd, 1024 + (descriptor_grupo->bg_inode_table - 1) * EXT2_BLOCK_SIZE(super_block), SEEK_SET);
+	lseek(fd, sizeof(struct ext2_inode) * (numero_inodo - 1), SEEK_CUR);
+	read(fd, &inodo, sizeof(struct ext2_inode));
 	
-	int i;
-	for (i = 0; i < punteros_por_bloque; i++)
+	if (S_ISDIR(inodo.i_mode))
 	{
-		lseek(fd, 1024 + (buffer_local[i] - 1) * tamanho_bloque, SEEK_SET);
-		read(fd, buffer_local + offset, tamanho_bloque);
-		offset += tamanho_bloque;
-	}
+		lseek(fd, 1024 + (inodo.i_block[0] - 1) * EXT2_BLOCK_SIZE(super_block), SEEK_SET);
+		
+		struct ext2_dir_entry_2 entrada_directorio;
+		int offset;
+		int suma_rec_len = 0;
+		
+		read(fd, &(entrada_directorio.inode), sizeof(__le32));
+		read(fd, &(entrada_directorio.rec_len), sizeof(__le16));
+		read(fd, &(entrada_directorio.name_len), sizeof(__u8));
+		read(fd, &(entrada_directorio.file_type), sizeof(__u8));
+		read(fd, &(entrada_directorio.name), entrada_directorio.name_len);
+		entrada_directorio.name[entrada_directorio.name_len] = '\0';
 	
-	return offset;
-}
-
-int get_bloque_ind_doble(int fd, int numero_bloque, int tamanho_bloque,
-	int punteros_por_bloque, char* buffer, int offset)
-{
-	printf("Lectura de bloque indirecto doble\n");
-	exit(1);
-}
-
-int get_bloque_ind_triple(int fd, int numero_bloque, int tamanho_bloque,
-	int punteros_por_bloque, char* buffer, int offset)
-{
-	printf("Lectura de bloque indirecto triple\n");
-	exit(1);
+		suma_rec_len += entrada_directorio.rec_len;
+		
+		while (suma_rec_len <= EXT2_BLOCK_SIZE(super_block)
+			&& entrada_directorio.rec_len != 0)
+		{
+			printf("Inodo: %2d - %s", entrada_directorio.inode, entrada_directorio.name);
+			
+			if (entrada_directorio.file_type == EXT2_FT_DIR
+				&& (!(entrada_directorio.name_len == 1 && entrada_directorio.name[0] == '.')
+				&& !(entrada_directorio.name_len == 2 && entrada_directorio.name[0] == '.' && entrada_directorio.name[1] == '.')))
+			{
+				printf("/\n");
+				leer_inodo(fd, super_block, descriptor_grupo, entrada_directorio.inode);
+			}
+			else
+			{
+				printf("\n");
+			}
+			
+			offset = entrada_directorio.rec_len - sizeof(__le32) - sizeof(__le16) - sizeof(__u8)
+				- sizeof(__u8) - entrada_directorio.name_len;
+			lseek(fd, offset, SEEK_CUR);
+			
+			read(fd, &(entrada_directorio.inode), sizeof(__le32));
+			read(fd, &(entrada_directorio.rec_len), sizeof(__le16));
+			read(fd, &(entrada_directorio.name_len), sizeof(__u8));
+			read(fd, &(entrada_directorio.file_type), sizeof(__u8));
+			read(fd, &(entrada_directorio.name), entrada_directorio.name_len);
+			entrada_directorio.name[entrada_directorio.name_len] = '\0';
+			
+			suma_rec_len += entrada_directorio.rec_len;
+		}
+		
+		lseek(fd, offset_aux, SEEK_SET);
+	}
 }
